@@ -1,6 +1,10 @@
 // docker overlay path:
-// /var/lib/docker/image/overlay2/layerdb/mounts
 
+//
+// /var/lib/docker/image/overlay2/layerdb/mounts/<containerId>/mount-id
+// contains mapping containerId -> mountContainerId
+// /var/lib/docker/overlay2/<mountContainerId>/
+// contains all container files
 
 package main
 
@@ -10,14 +14,12 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	"log"
+	"strings"
 	"time"
-
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-
 )
 
 type k8s struct {
@@ -40,9 +42,17 @@ func newK8s() (*k8s, error) {
 	return &client, nil
 }
 
+func getMountIdforContainerID(dockerPath string, containerId string) (string, error) {
+	bytes, err := ioutil.ReadFile(fmt.Sprintf("%v/image/overlay2/layerdb/mounts/%v/mount-id", dockerPath, containerId))
+	if err != nil {
+		return "", err
+	}
+	return string(bytes), nil
+}
+
 func dirSize(path string) (uint64, error) {
 	var size uint64
-	err := filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+	err := filepath.Walk(path, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -55,24 +65,24 @@ func dirSize(path string) (uint64, error) {
 }
 
 func main() {
-
+	fmt.Println("v12")
 	var sleepIntervalSecFlag *int
-	var containersDirectoryFlag *string
+	var dockerPathFlag *string
 
 	sleepIntervalSecFlag = flag.Int("sleepIntervalSec", 20, "interval between containers directory parsing")
-	containersDirectoryFlag = flag.String("containersDirectory", "./", "containers directory")
-
+	dockerPathFlag = flag.String("dockerPath", "/var/lib/docker", "containers directory")
 
 	flag.Parse()
 
 	fmt.Println(fmt.Sprintf("sleepIntervalSec    = %v", *sleepIntervalSecFlag))
-	fmt.Println(fmt.Sprintf("containersDirectory = %v", *containersDirectoryFlag))
+	fmt.Println(fmt.Sprintf("dockerPath = %v", *dockerPathFlag))
+
+	containerMounts := map[string]string{}
 
 	k8s, err := newK8s()
 	if err != nil {
 		panic(err)
 	}
-
 
 	for {
 
@@ -81,39 +91,35 @@ func main() {
 			fmt.Printf(fmt.Sprintf("%v", err.Error()))
 		} else {
 			for _, pod := range pods.Items {
-				fmt.Printf(fmt.Sprintf("pod: %v", pod.GetName()))
-				for container := range pod.Spec.Containers {
-					fmt.Printf(fmt.Sprintf("   %v", pod.Spec.Containers[container].Name))
+
+				if len(pod.Status.ContainerStatuses) > 0 {
+					for container := range pod.Spec.Containers {
+						fullContainerID := pod.Status.ContainerStatuses[container].ContainerID
+						if len(fullContainerID) > 10 {
+							containerID := strings.Replace(fullContainerID, "docker://", "", -1)
+
+							_, ok := containerMounts[containerID]
+							if !ok {
+								mountID, err := getMountIdforContainerID(*dockerPathFlag, containerID)
+								if err == nil {
+									containerMounts[containerID] = mountID
+								}
+							}
+
+							mountID, ok := containerMounts[containerID]
+							if ok {
+								fullContainerName := fmt.Sprintf("%v:%v\\%v", pod.Namespace, pod.Name, pod.Spec.Containers[container].Name)
+								size, err := dirSize(fmt.Sprintf("%v/overlay2/%v/diff", *dockerPathFlag, mountID))
+								if err != nil {
+									fmt.Println(fmt.Sprintf("error: could not parse directory for %v`n%v", fullContainerName, err))
+								} else {
+									fmt.Println(fmt.Sprintf("%8vMB  %v", size/(1024*1024), fullContainerName))
+								}
+							}
+						}
+					}
 				}
 			}
-		}
-
-
-
-
-		directories := map[string]uint64{}
-
-		files, err := ioutil.ReadDir(*containersDirectoryFlag)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		for _, file := range files {
-
-			if file.IsDir() {
-
-				size, err := dirSize(file.Name())
-
-				if err != nil {
-					fmt.Println(fmt.Sprintf("error parsing %s: %s", file.Name(), err))
-				} else {
-					directories[file.Name()] = size
-				}
-			}
-		}
-
-		for name, size := range directories {
-			fmt.Println(fmt.Sprintf("%20vMB %v",size/(1024*1024),name))
 		}
 
 		time.Sleep(time.Duration(*sleepIntervalSecFlag) * time.Second)
