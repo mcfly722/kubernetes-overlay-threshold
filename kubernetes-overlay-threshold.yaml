@@ -17,7 +17,10 @@ metadata:
 rules:
   - apiGroups: ["*"]
     resources: ["pods"]
-    verbs: ["get","list","watch"]
+    verbs: ["get","list","watch","delete"]
+  - apiGroups: ["*"]
+    resources: ["events"]
+    verbs: ["create","patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1beta1
 kind: ClusterRoleBinding
@@ -64,7 +67,7 @@ spec:
         image: mcfly722/kubernetes-overlay-threshold:latest
         command:
           - /kubernetes-overlay-threshold
-        args: ["-sleepIntervalSec","31","-dockerPath","/var/lib/docker"]
+        args: ["-sleepIntervalSec","123","-dockerPath","/var/lib/docker","-overlayThresholdMB","4096","-maxFilesThreshold","1048576"]
         env:
         resources:
           limits:
